@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.0)
 project(ccat)
 
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "" FORCE)
@@ -9,15 +9,15 @@ endif()
 
 if(MSVC)
 else()
-    set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+    set(CMAKE_CXX_FLAGS "-Wall -Wextra -std=gnu++0x")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -march=native")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
 endif()
 
 set(CMAKE_CXX_STANDARD 11)
 
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
+# set(THREADS_PREFER_PTHREAD_FLAG ON)
+# find_package(Threads REQUIRED)
 
 # Zstd library source files
 set(ZSTD_LIB_SRCFILES
@@ -85,7 +85,7 @@ set(ZPNG_APP_SRCFILES
 add_library(zpnglib ${ZPNG_LIB_SRCFILES} ${ZSTD_LIB_SRCFILES})
 
 add_executable(unit_test ${ZPNG_TEST_SRCFILES})
-target_link_libraries(unit_test zpnglib Threads::Threads)
+target_link_libraries(unit_test zpnglib pthread)
 
 add_executable(zpng ${ZPNG_APP_SRCFILES})
-target_link_libraries(zpng zpnglib Threads::Threads)
+target_link_libraries(zpng zpnglib pthread)
