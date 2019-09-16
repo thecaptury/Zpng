@@ -42,6 +42,7 @@ static const int kCompressionLevel = 1;
 
 // This enabled some specialized versions for RGB and RGBA
 #define ENABLE_RGB_COLOR_FILTER
+#define ENABLE_BAYER_FILTER
 
 // Header definitions
 #define ZPNG_HEADER_MAGIC 0xFBF8
@@ -128,6 +129,135 @@ static void UnpackAndUnfilter(
     }
 }
 
+#ifdef ENABLE_BAYER_FILTER
+
+// This should work well for RGGB and BGGR
+static void PackAndFilterXGGY(
+    const ZPNG_ImageData* imageData,
+    uint8_t* output
+)
+{
+    const unsigned height = imageData->HeightPixels;
+    const unsigned width = imageData->WidthPixels;
+
+    const uint8_t* input = imageData->Buffer.Data;
+
+    // Color plane split
+    const unsigned planeBytes = width * height / 4;
+    uint8_t* output_r = output;
+    uint8_t* output_b = output + planeBytes;
+    uint8_t* output_g = output + planeBytes * 2;
+
+    for (unsigned row = 0; row < height; row += 2)
+    {
+        uint8_t prev[2] = { 0, 0 };
+
+        // even
+        for (unsigned x = 0; x < width; x += 2)
+        {
+            uint8_t r = input[0];
+            uint8_t g = input[1];
+
+            r -= prev[0];
+            g -= prev[1];
+
+            prev[0] = input[0];
+            prev[1] = input[1];
+
+            *output_r++ = r;
+            *output_g++ = g;
+
+            input += 2;
+        }
+
+        prev[0] = prev[1] = 0;
+
+        // odd
+        for (unsigned x = 0; x < width; x += 2)
+        {
+            uint8_t g = input[0];
+            uint8_t b = input[1];
+
+            g -= prev[0];
+            b -= prev[1];
+
+            prev[0] = input[0];
+            prev[1] = input[1];
+
+            *output_b++ = b;
+            *output_g++ = g;
+
+            input += 2;
+        }
+    }
+}
+
+static void UnpackAndUnfilterXGGY(
+    const uint8_t* input,
+    ZPNG_ImageData* imageData
+)
+{
+    const unsigned height = imageData->HeightPixels;
+    const unsigned width = imageData->WidthPixels;
+
+    uint8_t* output = imageData->Buffer.Data;
+
+    // Color plane split
+    const unsigned planeBytes = width * height / 4;
+    const uint8_t* input_r = input;
+    const uint8_t* input_b = input + planeBytes;
+    const uint8_t* input_g = input + planeBytes * 2;
+
+    for (unsigned y = 0; y < height; y += 2)
+    {
+        uint8_t prev[2] = { 0, 0 };
+
+        // even
+        for (unsigned x = 0; x < width; x += 2)
+        {
+            uint8_t r = *input_r++;
+            uint8_t g = *input_g++;
+
+            // GB-RG filter from BCIF
+            //r += g;
+
+            r += prev[0];
+            g += prev[1];
+
+            output[0] = r;
+            output[1] = g;
+
+            prev[0] = r;
+            prev[1] = g;
+
+            output += 2;
+        }
+
+        prev[0] = prev[1] = 0;
+
+        // odd
+        for (unsigned x = 0; x < width; x += 2)
+        {
+            uint8_t g = *input_g++;
+            uint8_t b = *input_b++;
+
+            // GB-RG filter from BCIF
+            //b += g;
+
+            g += prev[0];
+            b += prev[1];
+
+            output[0] = g;
+            output[1] = b;
+
+            prev[0] = g;
+            prev[1] = b;
+
+            output += 2;
+        }
+    }
+}
+#endif
 
 #ifdef ENABLE_RGB_COLOR_FILTER
 
@@ -374,7 +504,7 @@ ZPNG_Buffer ZPNG_Compress(
     bufferOutput.Bytes = 0;
 
     const unsigned pixelCount = imageData->WidthPixels * imageData->HeightPixels;
-    const unsigned pixelBytes = imageData->BytesPerChannel * imageData->Channels;
+    const unsigned pixelBytes = (imageData->BytesPerChannel > 8) ? imageData->Channels : imageData->BytesPerChannel * imageData->Channels;
     const unsigned byteCount = pixelBytes * pixelCount;
 
     // FIXME: One day add support for other formats
@@ -404,33 +534,36 @@ ReturnResult:
     }
 
     // Pass 1: Pack and filter data.
-
-    switch (pixelBytes)
-    {
-    case 1:
-        PackAndFilter<1>(imageData, packing);
-        break;
-    case 2:
-        PackAndFilter<2>(imageData, packing);
-        break;
-    case 3:
-        PackAndFilter<3>(imageData, packing);
-        break;
-    case 4:
-        PackAndFilter<4>(imageData, packing);
-        break;
-    case 5:
-        PackAndFilter<5>(imageData, packing);
-        break;
-    case 6:
-        PackAndFilter<6>(imageData, packing);
-        break;
-    case 7:
-        PackAndFilter<7>(imageData, packing);
-        break;
-    case 8:
-        PackAndFilter<8>(imageData, packing);
-        break;
+    if (imageData->BytesPerChannel > 8) {
+        PackAndFilterXGGY(imageData, packing);
+    } else {
+        switch (pixelBytes)
+        {
+        case 1:
+            PackAndFilter<1>(imageData, packing);
+            break;
+        case 2:
+            PackAndFilter<2>(imageData, packing);
+            break;
+        case 3:
+            PackAndFilter<3>(imageData, packing);
+            break;
+        case 4:
+            PackAndFilter<4>(imageData, packing);
+            break;
+        case 5:
+            PackAndFilter<5>(imageData, packing);
+            break;
+        case 6:
+            PackAndFilter<6>(imageData, packing);
+            break;
+        case 7:
+            PackAndFilter<7>(imageData, packing);
+            break;
+        case 8:
+            PackAndFilter<8>(imageData, packing);
+            break;
+        }
     }
 
     // Pass 2: Compress the packed/filtered data.
@@ -498,7 +631,7 @@ ReturnResult:
     imageData.StrideBytes = imageData.WidthPixels * imageData.Channels;
 
     const unsigned pixelCount = imageData.WidthPixels * imageData.HeightPixels;
-    const unsigned pixelBytes = imageData.BytesPerChannel * imageData.Channels;
+    const unsigned pixelBytes = (imageData.BytesPerChannel > 8) ? imageData.Channels : imageData.BytesPerChannel * imageData.Channels;
     const unsigned byteCount = pixelBytes * pixelCount;
 
     // Space for packing
@@ -532,32 +665,36 @@ ReturnResult:
     imageData.Buffer.Data = output;
     imageData.Buffer.Bytes = byteCount;
 
-    switch (pixelBytes)
-    {
-    case 1:
-        UnpackAndUnfilter<1>(packing, &imageData);
-        break;
-    case 2:
-        UnpackAndUnfilter<2>(packing, &imageData);
-        break;
-    case 3:
-        UnpackAndUnfilter<3>(packing, &imageData);
-        break;
-    case 4:
-        UnpackAndUnfilter<4>(packing, &imageData);
-        break;
-    case 5:
-        UnpackAndUnfilter<5>(packing, &imageData);
-        break;
-    case 6:
-        UnpackAndUnfilter<6>(packing, &imageData);
-        break;
-    case 7:
-        UnpackAndUnfilter<7>(packing, &imageData);
-        break;
-    case 8:
-        UnpackAndUnfilter<8>(packing, &imageData);
-        break;
+    if (imageData.BytesPerChannel > 8) {
+        UnpackAndUnfilterXGGY(packing, &imageData);
+    } else {
+        switch (pixelBytes)
+        {
+        case 1:
+            UnpackAndUnfilter<1>(packing, &imageData);
+            break;
+        case 2:
+            UnpackAndUnfilter<2>(packing, &imageData);
+            break;
+        case 3:
+            UnpackAndUnfilter<3>(packing, &imageData);
+            break;
+        case 4:
+            UnpackAndUnfilter<4>(packing, &imageData);
+            break;
+        case 5:
+            UnpackAndUnfilter<5>(packing, &imageData);
+            break;
+        case 6:
+            UnpackAndUnfilter<6>(packing, &imageData);
+            break;
+        case 7:
+            UnpackAndUnfilter<7>(packing, &imageData);
+            break;
+        case 8:
+            UnpackAndUnfilter<8>(packing, &imageData);
+            break;
+        }
     }
 
     goto ReturnResult;
