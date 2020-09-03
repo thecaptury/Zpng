@@ -93,6 +93,10 @@ struct ZPNG_ImageData
 //------------------------------------------------------------------------------
 // API
 
+unsigned ZPNG_MaximumBufferSize(
+    const ZPNG_ImageData* imageData
+);
+
 /**
     ZPNG_Compress()
 
@@ -105,6 +109,19 @@ struct ZPNG_ImageData
 */
 ZPNG_Buffer ZPNG_Compress(
     const ZPNG_ImageData* imageData
+);
+
+/**
+    ZPNG_CompressToBuffer()
+
+    Compress image into preallocated buffer.
+
+    On success returns 1.
+    On failure returns 0.
+*/
+int ZPNG_CompressToBuffer(
+    const ZPNG_ImageData* imageData,
+    ZPNG_Buffer* out
 );
 
 /*

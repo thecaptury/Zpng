@@ -492,16 +492,36 @@ extern "C" {
 //------------------------------------------------------------------------------
 // API
 
+unsigned ZPNG_MaximumBufferSize(
+    const ZPNG_ImageData* imageData
+)
+{
+    const unsigned pixelCount = imageData->WidthPixels * imageData->HeightPixels;
+    const unsigned pixelBytes = (imageData->BytesPerChannel > 8) ? imageData->Channels : imageData->BytesPerChannel * imageData->Channels;
+    const unsigned byteCount = pixelBytes * pixelCount;
+    const unsigned maxOutputBytes = (unsigned)ZSTD_compressBound(byteCount);
+    return ZPNG_HEADER_OVERHEAD_BYTES + maxOutputBytes;
+}
+
 ZPNG_Buffer ZPNG_Compress(
     const ZPNG_ImageData* imageData
 )
 {
+    ZPNG_Buffer buffer;
+    buffer.Bytes = 0;
+    buffer.Data = nullptr;
+    ZPNG_CompressToBuffer(imageData, &buffer);
+
+    return buffer;
+}
+
+int ZPNG_CompressToBuffer(
+    const ZPNG_ImageData* imageData,
+    ZPNG_Buffer* bufferOutput
+)
+{
     uint8_t* packing = nullptr;
     uint8_t* output = nullptr;
-
-    ZPNG_Buffer bufferOutput;
-    bufferOutput.Data = nullptr;
-    bufferOutput.Bytes = 0;
 
     const unsigned pixelCount = imageData->WidthPixels * imageData->HeightPixels;
     const unsigned pixelBytes = (imageData->BytesPerChannel > 8) ? imageData->Channels : imageData->BytesPerChannel * imageData->Channels;
@@ -509,7 +529,7 @@ ZPNG_Buffer ZPNG_Compress(
 
     // FIXME: One day add support for other formats
     if (pixelBytes > 8) {
-        return bufferOutput;
+        return 0;
     }
 
     // Space for packing
@@ -517,17 +537,21 @@ ZPNG_Buffer ZPNG_Compress(
 
     if (!packing) {
 ReturnResult:
-        if (bufferOutput.Data != output) {
+        if (bufferOutput->Data != output && output) {
             free(output);
         }
         free(packing);
-        return bufferOutput;
+        return 0;
     }
 
     const unsigned maxOutputBytes = (unsigned)ZSTD_compressBound(byteCount);
-
-    // Space for output
-    output = (uint8_t*)calloc(1, ZPNG_HEADER_OVERHEAD_BYTES + maxOutputBytes);
+    if (bufferOutput->Bytes == 0) {
+        output = (uint8_t*)calloc(1, ZPNG_HEADER_OVERHEAD_BYTES + maxOutputBytes);
+    } else if (bufferOutput->Bytes < ZPNG_HEADER_OVERHEAD_BYTES + maxOutputBytes) {
+        return 0;
+    } else {
+        output = bufferOutput->Data;
+    }
 
     if (!output) {
         goto ReturnResult;
@@ -588,8 +612,8 @@ ReturnResult:
     header->Channels = (uint8_t)imageData->Channels;
     header->BytesPerChannel = (uint8_t)imageData->BytesPerChannel;
 
-    bufferOutput.Data = output;
-    bufferOutput.Bytes = ZPNG_HEADER_OVERHEAD_BYTES + (unsigned)result;
+    bufferOutput->Data = output;
+    bufferOutput->Bytes = ZPNG_HEADER_OVERHEAD_BYTES + (unsigned)result;
 
     goto ReturnResult;
 }
