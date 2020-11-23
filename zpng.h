@@ -87,12 +87,35 @@ struct ZPNG_ImageData
 
     // Width of pixel row in bytes
     unsigned StrideBytes;
+
+    // whether this frame is an I-frame
+    unsigned IsIFrame;
 };
 
+typedef void ZPNG_Context;
+typedef void ZPNG_Dictionary;
 
 //------------------------------------------------------------------------------
 // API
 
+/**
+    ZPNG_AllocateCompressionContext()
+
+*/
+ZPNG_Context* ZPNG_AllocateCompressionContext();
+
+void ZPNG_FreeCompressionContext(ZPNG_Context* context);
+
+void ZPNG_FreeDictionary(ZPNG_Dictionary* dict);
+
+/**
+    ZPNG_MaximumBufferSize()
+
+    Get maximum buffer size for preallocating image buffer outside ZPNG
+    for use with ZPNG_CompressToBuffer().
+
+    Returns the buffer size that should be allocated.
+*/
 unsigned ZPNG_MaximumBufferSize(
     const ZPNG_ImageData* imageData
 );
@@ -102,13 +125,17 @@ unsigned ZPNG_MaximumBufferSize(
 
     Compress image into a buffer.
 
+    context is optional
+
     The returned buffer should be passed to ZPNG_Free().
 
     On success returns a valid data pointer.
     On failure returns a null pointer.
 */
 ZPNG_Buffer ZPNG_Compress(
-    const ZPNG_ImageData* imageData
+    const ZPNG_ImageData* imageData,
+    ZPNG_Context* context = 0,
+    ZPNG_Dictionary** dictionary = 0
 );
 
 /**
@@ -116,12 +143,35 @@ ZPNG_Buffer ZPNG_Compress(
 
     Compress image into preallocated buffer.
 
+    context and dictionary are optional
+
     On success returns 1.
     On failure returns 0.
 */
 int ZPNG_CompressToBuffer(
     const ZPNG_ImageData* imageData,
-    ZPNG_Buffer* out
+    ZPNG_Buffer* out,
+    ZPNG_Context* context = 0,
+    ZPNG_Dictionary** dictionary = 0
+);
+
+/**
+    ZPNG_CompressVideoToBuffer()
+
+    Compress image into preallocated buffer
+    using delta encoding to .
+
+    context and dictionary are optional
+
+    On success returns 1.
+    On failure returns 0.
+*/
+int ZPNG_CompressVideoToBuffer(
+    const ZPNG_ImageData* refData,
+    const ZPNG_ImageData* imageData,
+    ZPNG_Buffer* out,
+    ZPNG_Context* context = 0,
+    ZPNG_Dictionary** dictionary = 0
 );
 
 /*
@@ -135,6 +185,22 @@ int ZPNG_CompressToBuffer(
     On failure returns a null pointer.
 */
 ZPNG_ImageData ZPNG_Decompress(
+    ZPNG_Buffer buffer
+);
+
+/*
+    ZPNG_DecompressVideo()
+
+    Decompress image from a buffer
+    using delta encoding relative to refData.
+
+    The returned ZPNG_Buffer should be passed to ZPNG_Free().
+
+    On success returns a valid data pointer.
+    On failure returns a null pointer.
+*/
+ZPNG_ImageData ZPNG_DecompressVideo(
+    const ZPNG_ImageData* refData,
     ZPNG_Buffer buffer
 );
 

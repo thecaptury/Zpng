@@ -27,12 +27,15 @@
     POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include "zpng.h"
+#define ZDICT_STATIC_LINKING_ONLY
 
+#include "zpng.h"
+#include "zstd/zdict.h"
 #include "zstd/zstd.h"
 
 #include <stdlib.h> // calloc
-
+#include <string.h> // memset
+#include <stdio.h>
 
 //------------------------------------------------------------------------------
 // Constants
@@ -46,6 +49,7 @@ static const int kCompressionLevel = 1;
 
 // Header definitions
 #define ZPNG_HEADER_MAGIC 0xFBF8
+#define ZPNG_VIDEO_HEADER_MAGIC 0xF8FB
 #define ZPNG_HEADER_OVERHEAD_BYTES 8
 
 // File format header
@@ -58,6 +62,22 @@ struct ZPNG_Header
     uint8_t BytesPerChannel;
 };
 
+#pragma clang optimize off
+
+ZPNG_Context* ZPNG_AllocateCompressionContext()
+{
+    return (ZPNG_Context*)ZSTD_createCCtx();
+}
+
+void ZPNG_FreeCompressionContext(ZPNG_Context* context)
+{
+    ZSTD_freeCCtx((ZSTD_CCtx*)context);
+}
+
+void ZPNG_FreeDictionary(ZPNG_Dictionary* dict)
+{
+    ZSTD_freeCDict((ZSTD_CDict*)dict);
+}
 
 //------------------------------------------------------------------------------
 // Image Processing
@@ -258,6 +278,92 @@ static void UnpackAndUnfilterXGGY(
     }
 }
 #endif
+
+// returns the number of overflow bytes
+template<int kChannels>
+static int PackAndFilterVideo(
+    const ZPNG_ImageData* refData,
+    const ZPNG_ImageData* imageData,
+    uint8_t* output
+)
+{
+    const unsigned height = imageData->HeightPixels;
+    const unsigned width = imageData->WidthPixels;
+
+    const uint8_t* input = imageData->Buffer.Data;
+    const uint8_t* ref = refData->Buffer.Data;
+
+    uint8_t* outStart = output;
+    unsigned overflowCount = 0;
+    uint8_t* overflow = output + height * width * kChannels;
+
+    for (unsigned y = 0; y < height; ++y)
+    {
+        for (unsigned x = 0; x < width; ++x)
+        {
+            // For each channel:
+            for (unsigned i = 0; i < kChannels; ++i)
+            {
+                int diff = (int)input[i] - ref[i];
+                if (diff > 127 || diff < -127) {
+                    if (overflowCount == 1000) {
+                        PackAndFilterXGGY(imageData, outStart);
+                        return -1;
+                    }
+                    output[i] = 0x80;
+                    *overflow = input[i];
+                    ++overflow;
+                    ++overflowCount;
+                } else
+                    output[i] = (int8_t)diff;
+            }
+
+            ref += kChannels;
+            input += kChannels;
+            output += kChannels;
+        }
+    }
+
+    if (overflowCount != 0)
+        printf("overflow: %d\n", overflowCount);
+
+    return overflowCount;
+}
+
+template<int kChannels>
+static void UnpackAndUnfilterVideo(
+    const ZPNG_ImageData* refData,
+    const uint8_t* input,
+    ZPNG_ImageData* imageData
+)
+{
+    const unsigned height = imageData->HeightPixels;
+    const unsigned width = imageData->WidthPixels;
+
+    const uint8_t* ref = refData->Buffer.Data;
+    uint8_t* output = imageData->Buffer.Data;
+    const uint8_t* overflow = input + height * width * kChannels;
+
+    for (unsigned y = 0; y < height; ++y)
+    {
+        for (unsigned x = 0; x < width; ++x)
+        {
+            // For each channel:
+            for (unsigned i = 0; i < kChannels; ++i)
+            {
+                if (input[i] == 0x80) {
+                    output[i] = *overflow;
+                    ++overflow;
+                } else
+                    output[i] = ref[i] + input[i];
+            }
+
+            ref += kChannels;
+            input += kChannels;
+            output += kChannels;
+        }
+    }
+}
 
 #ifdef ENABLE_RGB_COLOR_FILTER
 
@@ -492,32 +598,49 @@ extern "C" {
 //------------------------------------------------------------------------------
 // API
 
+
+
 unsigned ZPNG_MaximumBufferSize(
     const ZPNG_ImageData* imageData
 )
 {
     const unsigned pixelCount = imageData->WidthPixels * imageData->HeightPixels;
     const unsigned pixelBytes = (imageData->BytesPerChannel > 8) ? imageData->Channels : imageData->BytesPerChannel * imageData->Channels;
-    const unsigned byteCount = pixelBytes * pixelCount;
+    const unsigned byteCount = pixelBytes * pixelCount + 1000;
     const unsigned maxOutputBytes = (unsigned)ZSTD_compressBound(byteCount);
     return ZPNG_HEADER_OVERHEAD_BYTES + maxOutputBytes;
 }
 
 ZPNG_Buffer ZPNG_Compress(
-    const ZPNG_ImageData* imageData
+    const ZPNG_ImageData* imageData,
+    ZPNG_Context* context,
+    ZPNG_Dictionary** dictionary
 )
 {
     ZPNG_Buffer buffer;
     buffer.Bytes = 0;
     buffer.Data = nullptr;
-    ZPNG_CompressToBuffer(imageData, &buffer);
+    ZPNG_CompressVideoToBuffer(nullptr, imageData, &buffer, context, dictionary);
 
     return buffer;
 }
 
 int ZPNG_CompressToBuffer(
     const ZPNG_ImageData* imageData,
-    ZPNG_Buffer* bufferOutput
+    ZPNG_Buffer* bufferOutput,
+    ZPNG_Context* context,
+    ZPNG_Dictionary** dictionary
+)
+{
+    return ZPNG_CompressVideoToBuffer(0, imageData, bufferOutput, context, dictionary);
+}
+
+int ZPNG_CompressVideoToBuffer(
+    const ZPNG_ImageData* refData,
+    const ZPNG_ImageData* imageData,
+    ZPNG_Buffer* bufferOutput,
+    ZPNG_Context* context,
+    ZPNG_Dictionary** dictionary
 )
 {
     uint8_t* packing = nullptr;
@@ -533,7 +656,7 @@ int ZPNG_CompressToBuffer(
     }
 
     // Space for packing
-    packing = (uint8_t*)calloc(1, byteCount);
+    packing = (uint8_t*)calloc(1, byteCount + 1000);
 
     if (!packing) {
 ReturnResult:
@@ -557,47 +680,110 @@ ReturnResult:
         goto ReturnResult;
     }
 
+    int overflowCount = 0;
+
     // Pass 1: Pack and filter data.
-    if (imageData->BytesPerChannel > 8) {
-        PackAndFilterXGGY(imageData, packing);
-    } else {
+    if (refData)
+    {
         switch (pixelBytes)
         {
-        case 1:
-            PackAndFilter<1>(imageData, packing);
-            break;
+        case 1: {
+            overflowCount = PackAndFilterVideo<1>(refData, imageData, packing);
+            // ZPNG_ImageData out = *refData;
+            // out.Buffer.Data = (uint8_t*)calloc(1, byteCount);
+            // UnpackAndUnfilterVideo<1>(refData, packing, &out);
+            // if (memcmp(imageData->Buffer.Data, out.Buffer.Data, out.Buffer.Bytes) != 0) {
+            //     printf("unpacking doesn't match packing\n");
+            // }
+            break; }
         case 2:
-            PackAndFilter<2>(imageData, packing);
+            overflowCount = PackAndFilterVideo<2>(refData, imageData, packing);
             break;
         case 3:
-            PackAndFilter<3>(imageData, packing);
+            overflowCount = PackAndFilterVideo<3>(refData, imageData, packing);
             break;
         case 4:
-            PackAndFilter<4>(imageData, packing);
+            overflowCount = PackAndFilterVideo<4>(refData, imageData, packing);
             break;
         case 5:
-            PackAndFilter<5>(imageData, packing);
+            overflowCount = PackAndFilterVideo<5>(refData, imageData, packing);
             break;
         case 6:
-            PackAndFilter<6>(imageData, packing);
+            overflowCount = PackAndFilterVideo<6>(refData, imageData, packing);
             break;
         case 7:
-            PackAndFilter<7>(imageData, packing);
+            overflowCount = PackAndFilterVideo<7>(refData, imageData, packing);
             break;
         case 8:
-            PackAndFilter<8>(imageData, packing);
+            overflowCount = PackAndFilterVideo<8>(refData, imageData, packing);
             break;
+        }
+    } else {
+        if (imageData->BytesPerChannel > 8) {
+            PackAndFilterXGGY(imageData, packing);
+        } else {
+            switch (pixelBytes)
+            {
+            case 1:
+                PackAndFilter<1>(imageData, packing);
+                break;
+            case 2:
+                PackAndFilter<2>(imageData, packing);
+                break;
+            case 3:
+                PackAndFilter<3>(imageData, packing);
+                break;
+            case 4:
+                PackAndFilter<4>(imageData, packing);
+                break;
+            case 5:
+                PackAndFilter<5>(imageData, packing);
+                break;
+            case 6:
+                PackAndFilter<6>(imageData, packing);
+                break;
+            case 7:
+                PackAndFilter<7>(imageData, packing);
+                break;
+            case 8:
+                PackAndFilter<8>(imageData, packing);
+                break;
+            }
         }
     }
 
     // Pass 2: Compress the packed/filtered data.
-
-    const size_t result = ZSTD_compress(
-        output + ZPNG_HEADER_OVERHEAD_BYTES,
-        maxOutputBytes,
-        packing,
-        byteCount,
-        kCompressionLevel);
+    size_t result;
+    if (context)
+    {
+        if (*dictionary == nullptr)
+        {
+            char* dictBuf = (char*)malloc(100000);
+            size_t* sampleSizes = (size_t*)malloc(imageData->HeightPixels * 8 * sizeof(size_t));
+            for (uint i = 0; i < imageData->HeightPixels * 8; ++i)
+                sampleSizes[i] = byteCount / imageData->HeightPixels / 8;
+            ZDICT_cover_params_t params = {32, 8, 0, 1, {kCompressionLevel, 0, 0}};
+            size_t actualSize = ZDICT_trainFromBuffer_cover(dictBuf, 100000, packing, sampleSizes, imageData->HeightPixels * 8, params);
+            free(sampleSizes);
+            *dictionary = (void*)ZSTD_createCDict(dictBuf, actualSize, kCompressionLevel);
+            free(dictBuf);
+        }
+        result = ZSTD_compress_usingCDict(
+            (ZSTD_CCtx*)context,
+            output + ZPNG_HEADER_OVERHEAD_BYTES,
+            maxOutputBytes,
+            packing,
+            byteCount + ((overflowCount >= 0) ? overflowCount : 0),
+            (ZSTD_CDict*)*dictionary);
+    } else
+    {
+        result = ZSTD_compress(
+            output + ZPNG_HEADER_OVERHEAD_BYTES,
+            maxOutputBytes,
+            packing,
+            byteCount + ((overflowCount >= 0) ? overflowCount : 0),
+            kCompressionLevel);
+    }
 
     if (ZSTD_isError(result)) {
         goto ReturnResult;
@@ -606,7 +792,7 @@ ReturnResult:
     // Write header
 
     ZPNG_Header* header = (ZPNG_Header*)output;
-    header->Magic = ZPNG_HEADER_MAGIC;
+    header->Magic = (refData && overflowCount >= 0) ? ZPNG_VIDEO_HEADER_MAGIC : ZPNG_HEADER_MAGIC;
     header->Width = (uint16_t)imageData->WidthPixels;
     header->Height = (uint16_t)imageData->HeightPixels;
     header->Channels = (uint8_t)imageData->Channels;
@@ -622,6 +808,14 @@ ZPNG_ImageData ZPNG_Decompress(
     ZPNG_Buffer buffer
 )
 {
+    return ZPNG_DecompressVideo(nullptr, buffer);
+}
+
+ZPNG_ImageData ZPNG_DecompressVideo(
+    const ZPNG_ImageData* refData,
+    ZPNG_Buffer buffer
+)
+{
     uint8_t* packing = nullptr;
     uint8_t* output = nullptr;
 
@@ -633,6 +827,7 @@ ZPNG_ImageData ZPNG_Decompress(
     imageData.HeightPixels = 0;
     imageData.StrideBytes = 0;
     imageData.WidthPixels = 0;
+    imageData.IsIFrame = 1;
 
     if (!buffer.Data || buffer.Bytes < ZPNG_HEADER_OVERHEAD_BYTES) {
 ReturnResult:
@@ -644,8 +839,17 @@ ReturnResult:
     }
 
     const ZPNG_Header* header = (const ZPNG_Header*)buffer.Data;
-    if (header->Magic != ZPNG_HEADER_MAGIC) {
-        goto ReturnResult;
+    if (refData == nullptr) {
+        if (header->Magic != ZPNG_HEADER_MAGIC) {
+            goto ReturnResult;
+        }
+    } else {
+        if (header->Magic != ZPNG_HEADER_MAGIC) {
+            if (header->Magic == ZPNG_VIDEO_HEADER_MAGIC)
+                imageData.IsIFrame = 0;
+            else
+                goto ReturnResult;
+        }
     }
 
     imageData.WidthPixels = header->Width;
@@ -659,7 +863,7 @@ ReturnResult:
     const unsigned byteCount = pixelBytes * pixelCount;
 
     // Space for packing
-    packing = (uint8_t*)calloc(1, byteCount);
+    packing = (uint8_t*)calloc(1, byteCount + 1000);
 
     if (!packing) {
         goto ReturnResult;
@@ -669,7 +873,7 @@ ReturnResult:
 
     const size_t result = ZSTD_decompress(
         packing,
-        byteCount,
+        byteCount + 1000,
         buffer.Data + ZPNG_HEADER_OVERHEAD_BYTES,
         buffer.Bytes - ZPNG_HEADER_OVERHEAD_BYTES);
 
@@ -689,35 +893,65 @@ ReturnResult:
     imageData.Buffer.Data = output;
     imageData.Buffer.Bytes = byteCount;
 
-    if (imageData.BytesPerChannel > 8) {
-        UnpackAndUnfilterXGGY(packing, &imageData);
+    if (refData && !imageData.IsIFrame) {
+            switch (pixelBytes)
+            {
+            case 1:
+                UnpackAndUnfilterVideo<1>(refData, packing, &imageData);
+                break;
+            case 2:
+                UnpackAndUnfilterVideo<2>(refData, packing, &imageData);
+                break;
+            case 3:
+                UnpackAndUnfilterVideo<3>(refData, packing, &imageData);
+                break;
+            case 4:
+                UnpackAndUnfilterVideo<4>(refData, packing, &imageData);
+                break;
+            case 5:
+                UnpackAndUnfilterVideo<5>(refData, packing, &imageData);
+                break;
+            case 6:
+                UnpackAndUnfilterVideo<6>(refData, packing, &imageData);
+                break;
+            case 7:
+                UnpackAndUnfilterVideo<7>(refData, packing, &imageData);
+                break;
+            case 8:
+                UnpackAndUnfilterVideo<8>(refData, packing, &imageData);
+                break;
+            }
     } else {
-        switch (pixelBytes)
-        {
-        case 1:
-            UnpackAndUnfilter<1>(packing, &imageData);
-            break;
-        case 2:
-            UnpackAndUnfilter<2>(packing, &imageData);
-            break;
-        case 3:
-            UnpackAndUnfilter<3>(packing, &imageData);
-            break;
-        case 4:
-            UnpackAndUnfilter<4>(packing, &imageData);
-            break;
-        case 5:
-            UnpackAndUnfilter<5>(packing, &imageData);
-            break;
-        case 6:
-            UnpackAndUnfilter<6>(packing, &imageData);
-            break;
-        case 7:
-            UnpackAndUnfilter<7>(packing, &imageData);
-            break;
-        case 8:
-            UnpackAndUnfilter<8>(packing, &imageData);
-            break;
+        if (imageData.BytesPerChannel > 8) {
+            UnpackAndUnfilterXGGY(packing, &imageData);
+        } else {
+            switch (pixelBytes)
+            {
+            case 1:
+                UnpackAndUnfilter<1>(packing, &imageData);
+                break;
+            case 2:
+                UnpackAndUnfilter<2>(packing, &imageData);
+                break;
+            case 3:
+                UnpackAndUnfilter<3>(packing, &imageData);
+                break;
+            case 4:
+                UnpackAndUnfilter<4>(packing, &imageData);
+                break;
+            case 5:
+                UnpackAndUnfilter<5>(packing, &imageData);
+                break;
+            case 6:
+                UnpackAndUnfilter<6>(packing, &imageData);
+                break;
+            case 7:
+                UnpackAndUnfilter<7>(packing, &imageData);
+                break;
+            case 8:
+                UnpackAndUnfilter<8>(packing, &imageData);
+                break;
+            }
         }
     }
 
