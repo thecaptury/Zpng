@@ -62,7 +62,7 @@ struct ZPNG_Header
     uint8_t BytesPerChannel;
 };
 
-#pragma clang optimize off
+//#pragma clang optimize off
 
 ZPNG_Context* ZPNG_AllocateCompressionContext()
 {
@@ -93,6 +93,7 @@ static void PackAndFilter(
 {
     const unsigned height = imageData->HeightPixels;
     const unsigned width = imageData->WidthPixels;
+    const unsigned rowStep = imageData->StrideBytes - width*kChannels;
 
     const uint8_t* input = imageData->Buffer.Data;
 
@@ -114,6 +115,7 @@ static void PackAndFilter(
             input += kChannels;
             output += kChannels;
         }
+        input += rowStep;
     }
 }
 
