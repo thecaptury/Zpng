@@ -64,7 +64,7 @@ struct ZPNG_Header
     uint8_t BytesPerChannel;
 };
 
-#pragma clang optimize off
+//#pragma clang optimize off
 
 ZPNG_Context* ZPNG_AllocateCompressionContext()
 {
@@ -95,6 +95,7 @@ static void PackAndFilter(
 {
     const unsigned height = imageData->HeightPixels;
     const unsigned width = imageData->WidthPixels;
+    const unsigned rowStep = imageData->StrideBytes - width*kChannels;
 
     const uint8_t* input = imageData->Buffer.Data;
 
@@ -116,6 +117,7 @@ static void PackAndFilter(
             input += kChannels;
             output += kChannels;
         }
+        input += rowStep;
     }
 }
 
@@ -161,6 +163,7 @@ static void PackAndFilterXGGY(
 {
     const unsigned height = imageData->HeightPixels;
     const unsigned width = imageData->WidthPixels;
+    const unsigned rowStep = imageData->StrideBytes - width;
 
     const uint8_t* input = imageData->Buffer.Data;
 
@@ -191,6 +194,7 @@ static void PackAndFilterXGGY(
 
             input += 2;
         }
+        input += rowStep;
 
         prev[0] = prev[1] = 0;
 
@@ -211,6 +215,7 @@ static void PackAndFilterXGGY(
 
             input += 2;
         }
+        input += rowStep;
     }
 }
 
@@ -291,6 +296,7 @@ static int PackAndFilterVideo(
 {
     const unsigned height = imageData->HeightPixels;
     const unsigned width = imageData->WidthPixels;
+    const unsigned rowStep = imageData->StrideBytes - width * kChannels;
 
     const uint8_t* input = imageData->Buffer.Data;
     const uint8_t* ref = refData->Buffer.Data;
@@ -324,6 +330,7 @@ static int PackAndFilterVideo(
             input += kChannels;
             output += kChannels;
         }
+        input += rowStep;
     }
 
     if (overflowCount != 0)
