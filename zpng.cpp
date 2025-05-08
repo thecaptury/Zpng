@@ -37,6 +37,8 @@
 #include <string.h> // memset
 #include <stdio.h>
 
+typedef unsigned int uint;
+
 //------------------------------------------------------------------------------
 // Constants
 
